@@ -12,11 +12,15 @@ import android.os.Bundle;
 import android.text.format.Formatter;
 import android.util.Log;
 import android.view.View;
+import android.widget.EditText;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -25,9 +29,8 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.UnknownHostException;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
+import java.util.Iterator;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -36,19 +39,30 @@ public class MainActivity extends AppCompatActivity {
     private String SERVICE_TYPE = "_nsdchat._tcp.";
     private int SERVICE_PORT = 0;
 
-    ServerSocket mServerSocket = null;
+    String REQUEST_CLIENT_DATA = "request_client_data";
+    String REQUEST_SERVER_ACK = "request_server_ack";
 
     private NsdManager mNsdManager;
     NsdManager.RegistrationListener mRegistrationListener;
     NsdManager.DiscoveryListener mDiscoveryListener;
-    NsdManager.ResolveListener mResolveListener;
+    CustomResolveListener mResolveListener;
+
+    ServerThread serverThread = null;
 
     HashMap<String, NsdServiceInfo> mServiceMap = new HashMap<String, NsdServiceInfo>();
+
+    ScrollView scrollView;
+    TextView tvChat;
+    EditText etMessage;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        scrollView = (ScrollView) findViewById(R.id.scroll);
+        tvChat = (TextView) findViewById(R.id.chat);
+        etMessage = (EditText) findViewById(R.id.message);
 
         mNsdManager = (NsdManager) getSystemService(Context.NSD_SERVICE);
         //registerService(SocketServerPORT);
@@ -79,7 +93,7 @@ public class MainActivity extends AppCompatActivity {
                 String mServiceName = NsdServiceInfo.getServiceName();
                 SERVICE_NAME = mServiceName;
                 Toast.makeText(MainActivity.this, "Successfully registered",
-                        Toast.LENGTH_LONG).show();
+                        Toast.LENGTH_SHORT).show();
                 Log.d("NsdserviceOnRegister", "Registered name : " + mServiceName);
             }
 
@@ -125,7 +139,7 @@ public class MainActivity extends AppCompatActivity {
                 Log.d("nsdservice", "Host = "+ service.getServiceName());
                 Log.d("nsdservice", "port = " + String.valueOf(service.getPort()));
 
-                Toast.makeText(MainActivity.this, "service found "+ service.getServiceName() + ":" + service.getPort() , Toast.LENGTH_SHORT).show();
+                //Toast.makeText(MainActivity.this, "service found "+ service.getServiceName() + ":" + service.getPort() , Toast.LENGTH_SHORT).show();
                 if (!service.getServiceType().equals(SERVICE_TYPE)) {
                     // Service type is the string containing the protocol and
                     // transport layer for this service.
@@ -145,7 +159,7 @@ public class MainActivity extends AppCompatActivity {
             public void onServiceLost(NsdServiceInfo service) {
                 // When the network service is no longer available.
                 // Internal bookkeeping code goes here.
-                Toast.makeText(MainActivity.this, "Service lost", Toast.LENGTH_SHORT).show();
+                //Toast.makeText(MainActivity.this, "Service lost", Toast.LENGTH_SHORT).show();
                 Log.e("nsdserviceLost", "service lost" + service);
                 mServiceMap.remove(service.getServiceName());
             }
@@ -173,46 +187,52 @@ public class MainActivity extends AppCompatActivity {
     }
 
     public void initializeResolveListener() {
-        mResolveListener = new NsdManager.ResolveListener() {
+        mResolveListener = new CustomResolveListener();
+    }
 
-            @Override
-            public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {
-                // Called when the resolve fails. Use the error code to debug.
-                Log.e("nsdservicetag", "Resolve failed " + errorCode);
-                Log.e("nsdservicetag", "serivce = " + serviceInfo);
+    public class CustomResolveListener implements NsdManager.ResolveListener {
+        private String request;
+        private String message;
 
-                Toast.makeText(MainActivity.this, "Resolve failed", Toast.LENGTH_SHORT).show();
+        public void setRequest(String request) {
+            this.request =  request;
+        }
+
+        public void setMessage(String message) {
+            this.message =  message;
+        }
+
+        @Override
+        public void onResolveFailed(NsdServiceInfo serviceInfo, int errorCode) {
+            // Called when the resolve fails. Use the error code to debug.
+            Log.e("nsdservicetag", "Resolve failed " + errorCode);
+            Log.e("nsdservicetag", "serivce = " + serviceInfo);
+
+            Toast.makeText(MainActivity.this, "Resolve failed", Toast.LENGTH_SHORT).show();
+        }
+
+        @Override
+        public void onServiceResolved(NsdServiceInfo serviceInfo) {
+            Log.d("nsdservicetag", "Resolve Succeeded. " + serviceInfo);
+
+            if (serviceInfo.getServiceName().equals(SERVICE_NAME)) {
+                Log.d("nsdservicetag", "Same IP.");
+                return;
             }
 
-            @Override
-            public void onServiceResolved(NsdServiceInfo serviceInfo) {
-                Log.d("nsdservicetag", "Resolve Succeeded. " + serviceInfo);
+            final NsdServiceInfo mService = serviceInfo;
+            int hostPort = mService.getPort();
+            InetAddress hostAddress = mService.getHost();
 
-                if (serviceInfo.getServiceName().equals(SERVICE_NAME)) {
-                    Log.d("nsdservicetag", "Same IP.");
-                    return;
-                }
-
-                NsdServiceInfo mService = serviceInfo;
-                int hostPort = mService.getPort();
-                InetAddress hostAddress = mService.getHost();
-
-                ClientThread clientThread = new ClientThread(
-                        SERVICE_NAME, hostAddress.getHostAddress(), hostPort);
-                clientThread.start();
-            }
-        };
+            ClientThread clientThread = new ClientThread(
+                    mService.getServiceName(), hostAddress.getHostAddress(), hostPort, request, message);
+            clientThread.start();
+        }
     }
 
     public void initializeServerSocket() {
-        // Initialize a server socket on the next available port.
-        try {
-            mServerSocket = new ServerSocket(0);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        // Store the chosen port.
-        SERVICE_PORT =  mServerSocket.getLocalPort();
+        serverThread = new ServerThread();
+        serverThread.start();
     }
 
     @Override
@@ -230,15 +250,12 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         if (mNsdManager != null) {
+            serverThread.close();
+
             mNsdManager.unregisterService(mRegistrationListener);
             mNsdManager.stopServiceDiscovery(mDiscoveryListener);
         }
         mServiceMap.clear();
-        try {
-            mServerSocket.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
         super.onPause();
     }
 
@@ -248,24 +265,23 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private class ClientThread extends Thread {
-        String clientName;
+        String dstName;
         String dstAddress;
         int dstPort;
-        String REQUEST_CONNECT_CLIENT = "request_connect_client";
+        String request;
+        String message;
 
-        String msgToSend = "";
-        boolean goOut = false;
-
-        ClientThread(String name, String address, int port) {
-            clientName = name;
+        ClientThread(String name, String address, int port, String request, String message) {
+            dstName = name;
             dstAddress = address;
             dstPort = port;
+            this.request = request;
+            this.message = message;
         }
 
         @Override
         public void run() {
             Socket socket = null;
-            ServerSocket serverSocket = null;
 
             //Getting Local address
             WifiManager wm = (WifiManager) getSystemService(WIFI_SERVICE);
@@ -273,57 +289,38 @@ public class MainActivity extends AppCompatActivity {
 
             JSONObject jsonData = new JSONObject();
             try {
-                jsonData.put("request", REQUEST_CONNECT_CLIENT);
+                jsonData.put("request", request);
                 jsonData.put("ipAddress", clientIP);
-                jsonData.put("clientName", clientName);
+                jsonData.put("name", SERVICE_NAME);
+
+
+                jsonData.put("message", message);
             } catch (JSONException e) {
                 e.printStackTrace();
                 Log.e("nsdServicejsontag", "can't put request");
                 return;
             }
+
             DataOutputStream dataOutputStream = null;
-            DataInputStream dataInputStream = null;
 
             try {
-                if (clientName.equals("XT1068")) {
-                    socket = new Socket(dstAddress, dstPort);
-                    dataOutputStream = new DataOutputStream(
-                            socket.getOutputStream());
-                    dataOutputStream.writeUTF(jsonData.toString());
-                    dataOutputStream.flush();
+                socket = new Socket(dstAddress, dstPort);
+                dataOutputStream = new DataOutputStream(
+                        socket.getOutputStream());
+                dataOutputStream.writeBytes(jsonData.toString());
+                dataOutputStream.flush();
 
-                    while (!goOut) {
-                        if (!msgToSend.equals("")) {
-                            dataOutputStream.writeUTF(msgToSend);
-                            dataOutputStream.flush();
-                            msgToSend = "";
+                if (request.equalsIgnoreCase(REQUEST_CLIENT_DATA)) {
+                    MainActivity.this.runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            tvChat.append("Me (to " + dstName + "): " + etMessage.getText().toString() + "\n");
+                            etMessage.setText("");
+                            scrollView.fullScroll(ScrollView.FOCUS_DOWN);
                         }
-                    }
-                } else {
-                    serverSocket = new ServerSocket();
-                    serverSocket.setReuseAddress(true);
-                    serverSocket.bind(new InetSocketAddress(SERVICE_PORT));
-                    socket = serverSocket.accept();
-                    dataInputStream = new DataInputStream(socket.getInputStream());
-
-                    String message = "";
-                    if (dataInputStream.available() > 0) {
-                         message = dataInputStream.readUTF();
-                    }
-                    Log.d("nsdServicejsonMsg", message);
+                    });
                 }
 
-            } catch (UnknownHostException e) {
-                e.printStackTrace();
-                final String eString = e.toString();
-                MainActivity.this.runOnUiThread(new Runnable() {
-
-                    @Override
-                    public void run() {
-                        Toast.makeText(MainActivity.this, eString, Toast.LENGTH_LONG).show();
-                    }
-
-                });
             } catch (IOException e) {
                 e.printStackTrace();
                 final String eString = e.toString();
@@ -344,25 +341,9 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
 
-                if (serverSocket != null) {
-                    try {
-                        serverSocket.close();
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
-
                 if (dataOutputStream != null) {
                     try {
                         dataOutputStream.close();
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
-
-                if (dataInputStream != null) {
-                    try {
-                        dataInputStream.close();
                     } catch (IOException e) {
                         e.printStackTrace();
                     }
@@ -373,12 +354,129 @@ public class MainActivity extends AppCompatActivity {
 
     }
 
+    private class ServerThread extends Thread {
+        ServerSocket serverSocket;
+
+        ServerThread() {
+            // Initialize a server socket on the next available port.
+            try {
+                serverSocket = new ServerSocket(0);
+                serverSocket.setReuseAddress(true);
+                //serverSocket.bind(new InetSocketAddress(serverSocket.getLocalPort()));
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            // Store the chosen port.
+            SERVICE_PORT =  serverSocket.getLocalPort();
+        }
+
+        @Override
+        public void run() {
+            Socket socket = null;
+            DataInputStream dataInputStream = null;
+
+            while (!serverSocket.isClosed()) {
+                try {
+                    socket = serverSocket.accept();
+                    dataInputStream = new DataInputStream(socket.getInputStream());
+                    ByteArrayOutputStream byteOutputStream = new ByteArrayOutputStream();
+                    byte[] buffer = new byte[1024];
+                    int size;
+
+                    String message = "";
+                    while ((size = dataInputStream.read(buffer)) != -1) {
+                        byteOutputStream.write(buffer, 0, size);
+                        //message = dataInputStream.readUTF();
+                    }
+                    message = byteOutputStream.toString();
+
+                    final HashMap<String, String> responseMap = new HashMap<String, String>();
+                    try {
+                        JSONObject jsonObject = new JSONObject(message);
+                        Iterator<String> keysItr = jsonObject.keys();
+                        while (keysItr.hasNext()) {
+                            String key = keysItr.next();
+                            String value = "";
+                            try {
+                                value = (String) jsonObject.get(key);
+                            } catch (Exception e) {}
+                            responseMap.put(key, value);
+                        }
+                    } catch (JSONException e) {
+                        e.printStackTrace();
+                    }
+
+                    if (responseMap.get("request").equalsIgnoreCase(REQUEST_CLIENT_DATA)) {
+                        MainActivity.this.runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                tvChat.append(responseMap.get("name") + ": " + responseMap.get("message") + "\n");
+                                scrollView.fullScroll(ScrollView.FOCUS_DOWN);
+                            }
+                        });
+                        sendMessage(responseMap.get("name"), REQUEST_SERVER_ACK, "ok");
+                    } else if (responseMap.get("request").equalsIgnoreCase(REQUEST_SERVER_ACK)) {
+                        if (responseMap.get("message").equalsIgnoreCase("ok")) {
+                            MainActivity.this.runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    Toast.makeText(MainActivity.this, "Message delivered.", Toast.LENGTH_SHORT).show();
+                                }
+                            });
+                        }
+                    }
+
+
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    /*final String eString = e.toString();
+                    MainActivity.this.runOnUiThread(new Runnable() {
+
+                        @Override
+                        public void run() {
+                            Toast.makeText(MainActivity.this, eString, Toast.LENGTH_LONG).show();
+                        }
+
+                    });*/
+                } finally {
+                    if (socket != null) {
+                        try {
+                            socket.close();
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    }
+
+                    if (dataInputStream != null) {
+                        try {
+                            dataInputStream.close();
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                }
+            }
+
+        }
+
+        public void close() {
+            try {
+                serverSocket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+
+    }
+
     /** UI click handler */
     public void onClick(View clikedView) {
         switch (clikedView.getId()) {
             case R.id.send:
-                if (mServiceMap.size() == 0)
+                if (mServiceMap.size() == 0) {
+                    Toast.makeText(MainActivity.this, "No device found in the network.", Toast.LENGTH_LONG).show();
                     return;
+                }
                 final String[] serviceNamesArray = new String[mServiceMap.size()];
                 mServiceMap.keySet().toArray(serviceNamesArray);
                 new AlertDialog.Builder(this)
@@ -391,8 +489,10 @@ public class MainActivity extends AppCompatActivity {
                         .setPositiveButton("Send", new DialogInterface.OnClickListener() {
                             @Override
                             public void onClick(DialogInterface dialog, int which) {
-                                NsdServiceInfo service = mServiceMap.get(serviceNamesArray[0]);
-                                mNsdManager.resolveService(service, mResolveListener);
+                                int index = ((AlertDialog) dialog).getListView().getCheckedItemPosition();
+                                if (index != -1) {
+                                    sendMessage(serviceNamesArray[index], REQUEST_CLIENT_DATA, etMessage.getText().toString());
+                                }
                             }
                         })
                         .setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
@@ -402,6 +502,16 @@ public class MainActivity extends AppCompatActivity {
                             }
                         })
                         .create().show();
+                break;
+        }
+    }
+
+    public void sendMessage(String serviceName, String request, String message) {
+        NsdServiceInfo service = mServiceMap.get(serviceName);
+        if (service != null) {
+            mResolveListener.setRequest(request);
+            mResolveListener.setMessage(message);
+            mNsdManager.resolveService(service, mResolveListener);
         }
     }
 }
